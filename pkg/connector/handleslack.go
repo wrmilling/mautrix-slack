@@ -632,9 +632,11 @@ func (s *SlackMessage) ConvertMessage(ctx context.Context, portal *bridgev2.Port
 
 func (s *SlackMessage) ConvertEdit(ctx context.Context, portal *bridgev2.Portal, intent bridgev2.MatrixAPI, existing []*database.Message) (*bridgev2.ConvertedEdit, error) {
 	meta := existing[0].Metadata.(*slackid.MessageMetadata)
-	// Edited is nil when the message_changed event is caused by something other than
-	// an actual text edit, e.g. Slack attaching a link unfurl to the message.
-	if edited := s.Data.SubMessage.Edited; edited != nil && meta.LastEditTS >= edited.Timestamp {
+	// SubMessage/Edited is nil when the message_changed event is caused by something other than
+	// an actual text edit (e.g. Slack finalizing a file upload, or attaching a link unfurl).
+	if s.Data.SubMessage == nil {
+		return nil, bridgev2.ErrIgnoringRemoteEvent
+	} else if edited := s.Data.SubMessage.Edited; edited != nil && meta.LastEditTS >= edited.Timestamp {
 		return nil, fmt.Errorf(
 			"%w: last bridged edit is same as or newer than this one (%s >= %s)",
 			bridgev2.ErrIgnoringRemoteEvent, meta.LastEditTS, edited.Timestamp,
