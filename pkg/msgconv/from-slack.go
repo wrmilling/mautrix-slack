@@ -280,15 +280,24 @@ func (mc *MessageConverter) slackFileToMatrix(ctx context.Context, portal *bridg
 			MimeType:        content.Info.MimeType,
 		}
 		if url != "" {
-			err = client.GetFileContext(ctx, url, &doctypeCheckingWriteProxy{Writer: dest})
-			if errors.Is(err, errHTMLFile) {
-				log.Warn().Msg("Received HTML file from Slack, retrying in 5 seconds")
+			// Slack sometimes serves an HTML placeholder instead of the file while it's
+			// still processing (e.g. replicating a Slack Connect file to another workspace).
+			// Keep checking on every retry, not just the first one, so we never upload the
+			// placeholder as if it were the real file.
+			backoff := 5 * time.Second
+			for attempt := 0; ; attempt++ {
+				err = client.GetFileContext(ctx, url, &doctypeCheckingWriteProxy{Writer: dest})
+				if !errors.Is(err, errHTMLFile) || attempt >= 3 {
+					break
+				}
+				log.Warn().Int("attempt", attempt+1).Dur("backoff", backoff).
+					Msg("Received HTML file from Slack, retrying")
 				select {
-				case <-time.After(5 * time.Second):
+				case <-time.After(backoff):
 				case <-ctx.Done():
 					return nil, ctx.Err()
 				}
-				err = client.GetFileContext(ctx, url, dest)
+				backoff *= 2
 			}
 		} else if file.PermalinkPublic != "" {
 			var resp *http.Response
