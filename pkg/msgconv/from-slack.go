@@ -231,17 +231,50 @@ func makeErrorMessage(partID networkid.PartID, message string, args ...any) *bri
 
 type doctypeCheckingWriteProxy struct {
 	io.Writer
-	isStart bool
+	buf     []byte
+	checked bool
 }
 
 var errHTMLFile = errors.New("received HTML file")
+var htmlDoctypePrefix = []byte("<!DOCTYPE html>")
 
+// Write buffers writes until there's enough data to check for the HTML doctype
+// prefix (a single Write call isn't guaranteed to contain the whole prefix),
+// then either fails with errHTMLFile or flushes the buffer and proxies
+// everything after transparently.
 func (dtwp *doctypeCheckingWriteProxy) Write(p []byte) (n int, err error) {
-	if dtwp.isStart && bytes.HasPrefix(p, []byte("<!DOCTYPE html>")) {
+	if dtwp.checked {
+		return dtwp.Writer.Write(p)
+	}
+	dtwp.buf = append(dtwp.buf, p...)
+	if len(dtwp.buf) < len(htmlDoctypePrefix) {
+		return len(p), nil
+	}
+	if bytes.HasPrefix(dtwp.buf, htmlDoctypePrefix) {
 		return 0, errHTMLFile
 	}
-	dtwp.isStart = false
-	return dtwp.Writer.Write(p)
+	dtwp.checked = true
+	if _, err = dtwp.Writer.Write(dtwp.buf); err != nil {
+		return 0, err
+	}
+	dtwp.buf = nil
+	return len(p), nil
+}
+
+// Flush writes out any data still buffered because the stream ended before
+// enough bytes arrived to run the doctype check (only possible for files
+// smaller than the prefix itself).
+func (dtwp *doctypeCheckingWriteProxy) Flush() error {
+	if dtwp.checked || len(dtwp.buf) == 0 {
+		return nil
+	}
+	if bytes.HasPrefix(dtwp.buf, htmlDoctypePrefix) {
+		return errHTMLFile
+	}
+	_, err := dtwp.Writer.Write(dtwp.buf)
+	dtwp.buf = nil
+	dtwp.checked = true
+	return err
 }
 
 func (mc *MessageConverter) slackFileToMatrix(ctx context.Context, portal *bridgev2.Portal, intent bridgev2.MatrixAPI, client *slack.Client, partID networkid.PartID, file *slack.File) *bridgev2.ConvertedMessagePart {
@@ -286,7 +319,11 @@ func (mc *MessageConverter) slackFileToMatrix(ctx context.Context, portal *bridg
 			// placeholder as if it were the real file.
 			backoff := 5 * time.Second
 			for attempt := 0; ; attempt++ {
-				err = client.GetFileContext(ctx, url, &doctypeCheckingWriteProxy{Writer: dest})
+				proxy := &doctypeCheckingWriteProxy{Writer: dest}
+				err = client.GetFileContext(ctx, url, proxy)
+				if err == nil {
+					err = proxy.Flush()
+				}
 				if !errors.Is(err, errHTMLFile) || attempt >= 3 {
 					break
 				}
